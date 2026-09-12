@@ -1,15 +1,34 @@
 {
   "name": "LibreFang Development",
-  "image": "mcr.microsoft.com/devcontainers/rust:1-bullseye",
+  "build": {
+    "dockerfile": "../Dockerfile.rust-dev",
+    "context": ".."
+  },
   "features": {
+    // Node 22 is correct — confirmed against docs.librefang.ai/integrations/development,
+    // which lists "Node.js 22+" as required for the dashboard AND the desktop app.
+    // (Unchanged from your version — no fix needed here.)
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "22"
+    },
     "ghcr.io/devcontainers/features/python:1": {
       "version": "3.11"
     },
-    "ghcr.io/devcontainers/features/node:1": {
-      "version": "20"
-    }
+    // NEW: `just` is the officially recommended command runner (docs list it as a
+    // prerequisite and `just install` as "recommended for first-time setup"), but
+    // Dockerfile.rust-dev doesn't install it. Adding it as a feature avoids editing
+    // the Dockerfile and lets `postCreateCommand` below use `just install`, which
+    // builds the dashboard *and* the CLI in the right order automatically.
+    "ghcr.io/guiyomh/features/just:1": {}
   },
-  "postCreateCommand": "bash -o pipefail -c \"cargo build --workspace 2>&1 | tail -5 && echo '✅ Build complete!'\"",
+  // CHANGED: previously ran `cargo build --workspace` directly. On a fresh clone,
+  // crates/librefang-api/static/react/ (the embedded dashboard assets, gitignored)
+  // doesn't exist yet, and librefang-api's `include_dir!` needs it — bare
+  // `cargo build --workspace` can fail or embed an empty dashboard.
+  // `just install` (per docs.librefang.ai) builds the React dashboard first, then
+  // compiles the CLI, matching the officially recommended first-time setup flow.
+  // corepack/pnpm activation is kept since `just`'s dashboard step shells out to pnpm.
+  "postCreateCommand": "corepack enable && corepack prepare pnpm@10.33.0 --activate && just install && echo '✅ Build complete!'",
   "customizations": {
     "vscode": {
       "extensions": [
@@ -26,15 +45,37 @@
       }
     }
   },
-  "forwardPorts": [4545],
+  "forwardPorts": [4545, 5173],
   "portsAttributes": {
     "4545": {
       "label": "LibreFang Dashboard",
+      "onAutoForward": "notify"
+    },
+    "5173": {
+      "label": "Vite Dev Server",
       "onAutoForward": "notify"
     }
   },
   "remoteEnv": {
     "RUST_LOG": "info",
-    "RUST_BACKTRACE": "1"
-  }
+    "RUST_BACKTRACE": "1",
+    // NEW: forwards GH_TOKEN from the VPS shell's environment into the container.
+    // gh CLI is installed in Dockerfile.rust-dev (needed by `cargo xtask release`
+    // and `cargo xtask changelog`) but nothing authenticates it inside the
+    // container. If GH_TOKEN isn't set on the VPS this just resolves to an empty
+    // string — harmless unless you actually run those xtask commands.
+    "GH_TOKEN": "${localEnv:GH_TOKEN}"
+  },
+  // NEW: named volumes for the cargo registry/git cache and the build `target`
+  // dir. Without these, every container rebuild re-downloads the full crates.io
+  // index and dependency set, and re-does a cold `cargo build --workspace`
+  // (Dockerfile.rust-dev's own comments confirm this image was designed to have
+  // CARGO_HOME mounted externally by its original wrapper script — devcontainer.json
+  // has to do that itself since it's not using that wrapper). Target paths match
+  // the official rust Docker image's CARGO_HOME=/usr/local/cargo.
+  "mounts": [
+    "source=librefang-cargo-registry,target=/usr/local/cargo/registry,type=volume",
+    "source=librefang-cargo-git,target=/usr/local/cargo/git,type=volume",
+    "source=librefang-target,target=${containerWorkspaceFolder}/target,type=volume"
+  ]
 }
